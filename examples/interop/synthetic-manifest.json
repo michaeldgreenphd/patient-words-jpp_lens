@@ -1,0 +1,27 @@
+{
+  "schema_version": "lens-interop/1",
+  "method": "jpp",
+  "method_evidence": "Synthetic test fixture only",
+  "fit_identity_evidence": "Synthetic test fixture only",
+  "model": {
+    "id": "synthetic/toy",
+    "revision": "1111111111111111111111111111111111111111",
+    "tokenizer_id": "synthetic/toy",
+    "tokenizer_revision": "1111111111111111111111111111111111111111",
+    "width": 2,
+    "num_layers": 3
+  },
+  "artifact": {
+    "repository": "synthetic/lenses",
+    "revision": "2222222222222222222222222222222222222222",
+    "path": "toy.pt",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "capture_site": "block_output_pre_final_norm",
+  "layer_indexing": "zero_based",
+  "stream_reduction": "none",
+  "readout": "model_final_norm_then_lm_head",
+  "source_layers": [0, 1],
+  "target_layer": 2,
+  "audit_notes": ["Metadata-only synthetic fixture; tensor tests generate tiny local files and replace the sentinel SHA256."]
+}
