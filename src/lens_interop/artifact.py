@@ -259,17 +259,9 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
     return matrices, file_format
 
 
-def load_verified_lens(
-    path: str | Path, manifest: Mapping[str, Any], expected_model: Mapping[str, Any]
-) -> LoadedLens:
-    """Verify a local file hash, then deserialize tensors with weights-only.
-
-    Unknown fit identity is refused before reading the checkpoint. There is no
-    fallback to unrestricted pickle or to another lens method. A trusted hash
-    and manifest are still required: weights-only is not a resource-size gate.
-    """
-    report = validate_manifest(manifest, expected_model)
-    _require(report["status"] == "validated", "unknown_fit_identity", str(report["reasons"]))
+def _load_verified_checkpoint(path: str | Path, expected_sha256: str) -> Mapping[str, Any]:
+    """Hash and safely load the same open file for inspection or transport."""
+    _require(_digest(expected_sha256, 64), "invalid_artifact_hash", "lowercase SHA256 required")
     path = Path(path)
     try:
         import torch
@@ -281,7 +273,7 @@ def load_verified_lens(
         raise LensInteropError("artifact_unavailable", str(error)) from error
     with handle:
         digest = hashlib.file_digest(handle, "sha256").hexdigest()
-        _require(digest == manifest["artifact"]["sha256"], "artifact_hash_mismatch", str(path))
+        _require(digest == expected_sha256, "artifact_hash_mismatch", str(path))
         handle.seek(0)
         try:
             # Load the same open file that was hashed, not a pathname that
@@ -290,6 +282,90 @@ def load_verified_lens(
         except Exception as error:
             raise LensInteropError("safe_checkpoint_load_failed", str(error)) from error
     _require(isinstance(checkpoint, Mapping), "unsupported_checkpoint_format", "object required")
+    return checkpoint
+
+
+def _inspection_metadata(value: Any, path: str) -> Any:
+    """Preserve JSON-shaped metadata exactly, refusing lossy conversions."""
+    import math
+
+    if value is None or type(value) in (str, int, bool):
+        return value
+    if type(value) is float:
+        _require(math.isfinite(value), "unsupported_inspection_metadata", path)
+        return value
+    if type(value) is list:
+        return [_inspection_metadata(item, f"{path}[{index}]") for index, item in enumerate(value)]
+    if isinstance(value, Mapping):
+        _require(all(type(key) is str for key in value), "unsupported_inspection_metadata", path)
+        return {key: _inspection_metadata(item, f"{path}.{key}") for key, item in value.items()}
+    raise LensInteropError("unsupported_inspection_metadata", f"{path}: {type(value).__name__}")
+
+
+def inspect_verified_artifact(path: str | Path, expected_sha256: str) -> dict[str, Any]:
+    """Inspect a verified local artifact without granting transport permission.
+
+    This deliberately needs no model-fit manifest: embedded metadata is evidence
+    to inspect, not a claim to invent before opening the file. No tensor values
+    are returned. Missing method, layer or fit metadata remains missing; callers
+    must still use ``load_verified_lens`` and its independent identity checks.
+    A verified hash does not establish model compatibility or bound memory use.
+    """
+    checkpoint = _load_verified_checkpoint(path, expected_sha256)
+
+    import torch
+
+    _require(all(type(key) is str for key in checkpoint), "unsupported_checkpoint_format", "string field names required")
+    _require(not ("J" in checkpoint and "parameters" in checkpoint), "ambiguous_checkpoint_format", "both J and parameters")
+    if "parameters" in checkpoint:
+        parameters = checkpoint["parameters"]
+        _require(isinstance(parameters, Mapping) and set(parameters) == {"jacobians"}, "unsupported_parameters", "one linear map family required")
+        matrices = parameters["jacobians"]
+        file_format = "base_lens_parameters"
+        matrix_path = ["parameters", "jacobians"]
+    else:
+        _require("J" in checkpoint, "unsupported_checkpoint_format", "J or parameters.jacobians required")
+        matrices = checkpoint["J"]
+        file_format = "configured_J" if "config" in checkpoint else "released_J"
+        matrix_path = ["J"]
+    _require(isinstance(matrices, Mapping) and bool(matrices), "invalid_matrices", "nonempty layer map required")
+    _require(all(type(layer) is int for layer in matrices), "invalid_matrices", "integer layer keys required")
+    tensor_metadata = []
+    for layer, matrix in matrices.items():
+        _require(isinstance(matrix, torch.Tensor), "invalid_matrix", str(layer))
+        _require(matrix.layout == torch.strided, "invalid_matrix", f"{layer}: dense tensor required")
+        tensor_metadata.append({
+            "layer_key": layer, "layer_key_type": "int", "shape": list(matrix.shape),
+            "dtype": str(matrix.dtype), "device": str(matrix.device),
+            "all_finite": bool(torch.isfinite(matrix).all()),
+        })
+    raw_metadata = _inspection_metadata(
+        {key: value for key, value in checkpoint.items() if key not in {"J", "parameters"}}, "checkpoint",
+    )
+    return {
+        "schema_version": "lens-artifact-inspection/1", "status": "inspected",
+        "artifact_sha256": expected_sha256, "artifact_loaded": True,
+        "transport_authorized": False, "model_fit_compatibility": "not_evaluated",
+        "serialization_format": file_format, "checkpoint_fields": list(checkpoint),
+        "matrix_path": matrix_path, "matrices": tensor_metadata, "raw_metadata": raw_metadata,
+    }
+
+
+def load_verified_lens(
+    path: str | Path, manifest: Mapping[str, Any], expected_model: Mapping[str, Any]
+) -> LoadedLens:
+    """Verify a local file hash, then deserialize tensors with weights-only.
+
+    Unknown fit identity is refused before reading the checkpoint. There is no
+    fallback to unrestricted pickle or to another lens method. A trusted hash
+    and manifest are still required: weights-only is not a resource-size gate.
+    """
+    report = validate_manifest(manifest, expected_model)
+    _require(report["status"] == "validated", "unknown_fit_identity", str(report["reasons"]))
+    checkpoint = _load_verified_checkpoint(path, manifest["artifact"]["sha256"])
+
+    import torch
+
     matrices, file_format = _check_metadata(checkpoint, manifest)
     width = manifest["model"]["width"]
     for layer, matrix in matrices.items():

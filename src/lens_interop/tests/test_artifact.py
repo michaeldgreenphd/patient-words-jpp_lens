@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
+import os
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from lens_interop import LensInteropError, load_verified_lens, paired_readouts
+from lens_interop import (
+    LensInteropError,
+    inspect_verified_artifact,
+    load_verified_lens,
+    paired_readouts,
+)
 from lens_interop.tests.test_manifest import synthetic_manifest
 
 torch = pytest.importorskip("torch", reason="isolated tensor test environment required")
@@ -153,3 +162,79 @@ def test_actual_output_is_extracted_independently_of_last_fitted_layer(tmp_path:
         paired_readouts(lens, {1: residual}, SimpleNamespace(), positions=[0], native_unembed=lambda value: value)
     with pytest.raises(LensInteropError, match="invalid_positions"):
         paired_readouts(lens, {1: residual}, SimpleNamespace(logits=actual_logits), positions=[3], native_unembed=lambda value: value)
+
+
+@pytest.mark.parametrize("file_format", ["released_J", "base_lens_parameters", "configured_J"])
+def test_inspection_preserves_metadata_without_authorizing_transport(tmp_path: Path, file_format: str) -> None:
+    checkpoint = _checkpoint(file_format)
+    checkpoint["provenance"] = {"unknown_fit_revision": None, "recipe": {"mode": "toy", "count": 2}}
+    path, manifest = _save(tmp_path, checkpoint)
+    before = path.read_bytes()
+    report = inspect_verified_artifact(path, manifest["artifact"]["sha256"])
+    assert report["status"] == "inspected"
+    assert report["transport_authorized"] is False
+    assert report["model_fit_compatibility"] == "not_evaluated"
+    assert report["serialization_format"] == file_format
+    assert report["checkpoint_fields"] == list(checkpoint)
+    assert report["raw_metadata"]["provenance"] == checkpoint["provenance"]
+    assert report["matrices"] == [
+        {"layer_key": layer, "layer_key_type": "int", "shape": [2, 2],
+         "dtype": "torch.float32", "device": "cpu", "all_finite": True}
+        for layer in (0, 1)
+    ]
+    assert path.read_bytes() == before
+    expected = copy.deepcopy(manifest["model"])
+    manifest["model"]["revision"] = None
+    with pytest.raises(LensInteropError, match="unknown_fit_identity"):
+        load_verified_lens(path, manifest, expected)
+
+
+def test_inspection_hash_refuses_before_deserialization_and_safe_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path, manifest = _save(tmp_path, _checkpoint("released_J"))
+    calls = []
+
+    def refusing_load(*args: object, **kwargs: object) -> None:
+        calls.append(kwargs)
+        raise RuntimeError("synthetic refusal")
+
+    monkeypatch.setattr(torch, "load", refusing_load)
+    with pytest.raises(LensInteropError, match="artifact_hash_mismatch"):
+        inspect_verified_artifact(path, "f" * 64)
+    assert calls == []
+    with pytest.raises(LensInteropError, match="invalid_artifact_hash"):
+        inspect_verified_artifact(path, "missing")
+    assert calls == []
+    with pytest.raises(LensInteropError, match="safe_checkpoint_load_failed"):
+        inspect_verified_artifact(path, manifest["artifact"]["sha256"])
+    assert calls == [{"map_location": "cpu", "weights_only": True}]
+
+
+@pytest.mark.parametrize("checkpoint,code", [
+    ([1, 2], "unsupported_checkpoint_format"),
+    ({"other": {}}, "unsupported_checkpoint_format"),
+    ({"J": {}}, "invalid_matrices"),
+    ({"J": {"0": torch.eye(2)}}, "invalid_matrices"),
+    ({"J": {0: "not a tensor"}}, "invalid_matrix"),
+    ({"J": {0: torch.eye(2)}, "parameters": {"jacobians": {}}}, "ambiguous_checkpoint_format"),
+    ({"J": {0: torch.eye(2)}, "metadata": (1, 2)}, "unsupported_inspection_metadata"),
+])
+def test_inspection_malformed_artifact_is_named(tmp_path: Path, checkpoint: object, code: str) -> None:
+    path, manifest = _save(tmp_path, checkpoint)
+    with pytest.raises(LensInteropError) as caught:
+        inspect_verified_artifact(path, manifest["artifact"]["sha256"])
+    assert caught.value.code == code
+
+
+def test_inspection_cli_does_not_require_or_fabricate_fit_identity(tmp_path: Path) -> None:
+    path, manifest = _save(tmp_path, _checkpoint("released_J"))
+    env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[2]))
+    result = subprocess.run(
+        [sys.executable, "-m", "lens_interop", "--inspect", str(path),
+         "--sha256", manifest["artifact"]["sha256"]],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["status"] == "inspected"
+    assert report["transport_authorized"] is False
+    assert "model_revision" not in report["raw_metadata"]["provenance"]

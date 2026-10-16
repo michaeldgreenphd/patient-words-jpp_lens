@@ -3,9 +3,13 @@
 from .artifact import (
     LensInteropError,
     LoadedLens,
+    inspect_verified_artifact,
     load_verified_lens,
     paired_readouts,
     validate_manifest,
 )
 
-__all__ = ["LensInteropError", "LoadedLens", "load_verified_lens", "paired_readouts", "validate_manifest"]
+__all__ = [
+    "LensInteropError", "LoadedLens", "inspect_verified_artifact",
+    "load_verified_lens", "paired_readouts", "validate_manifest",
+]
