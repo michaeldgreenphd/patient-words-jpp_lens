@@ -111,3 +111,11 @@ def test_cli_dry_run_requires_no_model_libraries(tmp_path: Path) -> None:
     )
     assert result.returncode == 2
     assert json.loads(result.stdout)["status"] == "unsupported"
+
+
+@pytest.mark.parametrize("layers", [[2], [0, 2]])
+def test_sources_must_strictly_precede_transport_target(layers: list[int]) -> None:
+    manifest = synthetic_manifest()
+    manifest["source_layers"] = layers
+    with pytest.raises(LensInteropError, match="invalid_source_layers"):
+        validate_manifest(manifest)

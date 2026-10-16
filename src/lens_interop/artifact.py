@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -100,7 +101,7 @@ def validate_manifest(
     _require(layers == sorted(set(layers)), "invalid_source_layers", "sorted unique indices required")
     target = manifest.get("target_layer")
     _require(type(target) is int and 0 <= target < model["num_layers"], "missing_or_invalid_target_layer", "explicit target required")
-    _require(all(layer <= target for layer in layers), "invalid_source_layers", "source after target")
+    _require(all(layer < target for layer in layers), "invalid_source_layers", "sources must precede target")
     artifact = manifest.get("artifact")
     _require(isinstance(artifact, Mapping), "missing_artifact_identity", "artifact object required")
     assert isinstance(artifact, Mapping)
@@ -195,6 +196,7 @@ def paired_readouts(
 
 def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) -> tuple[dict[int, Any], str]:
     """Check explicit on-disk fields without inventing absent provenance."""
+    _require(not ("J" in checkpoint and "parameters" in checkpoint), "ambiguous_checkpoint_format", "both J and parameters")
     model = manifest["model"]
     layers = manifest["source_layers"]
     on_disk_layers = checkpoint.get("source_layers")
@@ -240,6 +242,19 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
         if "method" in provenance:
             external_names = {"jpp": "jpp", "jlens": "j_lens", "j_lens": "j_lens", "rlens": "r_lens", "r_lens": "r_lens"}
             _require(isinstance(provenance["method"], str) and external_names.get(provenance["method"]) == manifest["method"], "checkpoint_method_mismatch", "method")
+        elif "config_json" in provenance:
+            # This legacy release field has estimator semantics; the converted
+            # J++ source_config.lrp_mode field is a recipe, not a method label.
+            try:
+                legacy = json.loads(provenance["config_json"])
+            except (TypeError, ValueError) as error:
+                raise LensInteropError("invalid_legacy_estimator_metadata", "provenance.config_json") from error
+            _require(isinstance(legacy, Mapping), "invalid_legacy_estimator_metadata", "object required")
+            estimator = legacy.get("estimator")
+            _require(isinstance(estimator, str) and estimator in {"relp", "standard"},
+                     "unsupported_legacy_estimator", "explicit standard or relp estimator required")
+            legacy_method = "r_lens" if estimator == "relp" else "j_lens"
+            _require(manifest["method"] == legacy_method, "checkpoint_method_mismatch", "provenance.config_json.estimator")
         # The converted J++ release puts its original BaseLens config here.
         # Check it when present; keep it verbatim in raw_metadata below.
         if "source_config" in provenance:
@@ -249,11 +264,13 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
                 ("hf_model_name", model["id"]), ("d_model", model["width"]),
                 ("source_layers", layers),
                 ("relative_end_transport_layer", manifest["target_layer"] - model["num_layers"]),
-                ("model_revision", model["revision"]), ("tokenizer_revision", model["tokenizer_revision"]),
+                ("model_revision", model["revision"]), ("tokenizer_id", model["tokenizer_id"]),
+                ("tokenizer_revision", model["tokenizer_revision"]),
             ):
                 if key in source:
                     _require(source[key] == expected, "checkpoint_provenance_mismatch", f"source_config.{key}")
-        for key, model_key in (("model_revision", "revision"), ("tokenizer_revision", "tokenizer_revision")):
+        for key, model_key in (("model_revision", "revision"), ("tokenizer_id", "tokenizer_id"),
+                               ("tokenizer_revision", "tokenizer_revision")):
             if key in provenance:
                 _require(provenance[key] == model[model_key], "model_mismatch", key)
     return matrices, file_format

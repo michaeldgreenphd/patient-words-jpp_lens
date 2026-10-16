@@ -42,10 +42,23 @@ The semantic fields are:
 The loader accepts released `J` files and configured `parameters.jacobians`
 files, plus the configured top-level `J` variation. All must carry explicit
 `source_layers`; every matrix must match the declared width, layer set, and
-finite floating dtype. The configured format must identify its algebra and
+finite floating dtype. Every fitted source must strictly precede its transport
+target, matching the upstream trainer. Files containing both top-level `J` and
+`parameters` refuse as ambiguous in inspection and transport, rather than
+choosing one of two potentially different maps. The configured format must identify its algebra and
 relative target. On-disk provenance, including converted J++ `source_config`,
 is cross-checked where present. Missing fields are not filled into the raw
 provenance: `LoadedLens.raw_metadata` preserves it unchanged.
+
+When a legacy release has no explicit `provenance.method`, its
+`provenance.config_json.estimator` is cross-checked: `relp` is consistent with
+R-Lens, and `standard` with J-Lens, following the upstream legacy loader's
+estimator distinction. Malformed or unknown estimator metadata refuses instead
+of becoming a default method. This check does not turn the converted J++
+`source_config.lrp_mode=rlens` fitting recipe into an R-Lens scientific label;
+its explicit `provenance.method=jpp` stays J++. Embedded tokenizer IDs in direct
+provenance and `source_config` must agree with the independently supplied manifest,
+just as embedded fit revisions must. Raw metadata remains unchanged.
 
 `LoadedLens.transport(h, layer)` performs `h.float() @ J.float().T`.
 `readout(h, layer, native_unembed)` calls the supplied native final normalization

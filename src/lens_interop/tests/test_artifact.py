@@ -238,3 +238,71 @@ def test_inspection_cli_does_not_require_or_fabricate_fit_identity(tmp_path: Pat
     assert report["status"] == "inspected"
     assert report["transport_authorized"] is False
     assert "model_revision" not in report["raw_metadata"]["provenance"]
+
+
+@pytest.mark.parametrize("with_config", [False, True])
+def test_transport_refuses_ambiguous_matrix_layouts(tmp_path: Path, with_config: bool) -> None:
+    checkpoint = _checkpoint("configured_J" if with_config else "released_J")
+    checkpoint["parameters"] = {"jacobians": {0: 2 * torch.eye(2), 1: 2 * torch.eye(2)}}
+    path, manifest = _save(tmp_path, checkpoint)
+    with pytest.raises(LensInteropError, match="ambiguous_checkpoint_format"):
+        load_verified_lens(path, manifest, manifest["model"])
+
+
+@pytest.mark.parametrize("estimator,method,accepted", [
+    ("relp", "r_lens", True), ("relp", "j_lens", False), ("relp", "jpp", False),
+    ("standard", "j_lens", True), ("standard", "r_lens", False), ("standard", "jpp", False),
+])
+def test_legacy_estimator_cross_checks_method(
+    tmp_path: Path, estimator: str, method: str, accepted: bool,
+) -> None:
+    checkpoint = _checkpoint("released_J")
+    checkpoint["provenance"].pop("method")
+    checkpoint["provenance"]["config_json"] = json.dumps({"estimator": estimator, "rules": {"ln_rule": True}})
+    path, manifest = _save(tmp_path, checkpoint)
+    manifest["method"] = method
+    if accepted:
+        loaded = load_verified_lens(path, manifest, manifest["model"])
+        assert loaded.raw_metadata["provenance"] == checkpoint["provenance"]
+    else:
+        with pytest.raises(LensInteropError, match="checkpoint_method_mismatch"):
+            load_verified_lens(path, manifest, manifest["model"])
+
+
+@pytest.mark.parametrize("payload,code", [
+    ("{", "invalid_legacy_estimator_metadata"), ("[]", "invalid_legacy_estimator_metadata"),
+    ("{}", "unsupported_legacy_estimator"), ('{"estimator": "other"}', "unsupported_legacy_estimator"),
+])
+def test_legacy_estimator_never_silently_defaults(tmp_path: Path, payload: str, code: str) -> None:
+    checkpoint = _checkpoint("released_J")
+    checkpoint["provenance"].pop("method")
+    checkpoint["provenance"]["config_json"] = payload
+    path, manifest = _save(tmp_path, checkpoint)
+    with pytest.raises(LensInteropError, match=code):
+        load_verified_lens(path, manifest, manifest["model"])
+
+
+def test_explicit_converted_jpp_recipe_keeps_scientific_identity(tmp_path: Path) -> None:
+    checkpoint = _checkpoint("released_J")
+    checkpoint["provenance"]["lrp_mode"] = "rlens"
+    checkpoint["provenance"]["source_config"] = {
+        "lrp_mode": "rlens", "tokenizer_id": "synthetic/toy",
+    }
+    path, manifest = _save(tmp_path, checkpoint)
+    loaded = load_verified_lens(path, manifest, manifest["model"])
+    assert loaded.manifest["method"] == "jpp"
+    assert loaded.raw_metadata["provenance"] == checkpoint["provenance"]
+
+
+@pytest.mark.parametrize("scope", ["provenance", "source_config"])
+def test_checkpoint_tokenizer_identity_must_match_manifest(tmp_path: Path, scope: str) -> None:
+    checkpoint = _checkpoint("released_J")
+    metadata = checkpoint["provenance"]
+    if scope == "source_config":
+        metadata["source_config"] = {}
+        metadata = metadata["source_config"]
+    metadata["tokenizer_id"] = "synthetic/other"
+    path, manifest = _save(tmp_path, checkpoint)
+    with pytest.raises(LensInteropError) as caught:
+        load_verified_lens(path, manifest, manifest["model"])
+    assert caught.value.code in {"model_mismatch", "checkpoint_provenance_mismatch"}
