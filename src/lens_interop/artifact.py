@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import re
 from collections.abc import Callable, Mapping
@@ -194,6 +195,19 @@ def paired_readouts(
     }
 
 
+
+def _configured_source_layers(value: Any, num_layers: int, target: int, location: str) -> list[int]:
+    """Resolve trainer notation for comparison, without rewriting provenance."""
+    if value is None:
+        return list(range(target))
+    _require(isinstance(value, list) and all(type(layer) is int for layer in value),
+             "checkpoint_layer_mismatch", location)
+    resolved = sorted({layer + num_layers if layer < 0 else layer for layer in value})
+    _require(bool(resolved) and all(0 <= layer < target for layer in resolved),
+             "checkpoint_layer_mismatch", location)
+    return resolved
+
+
 def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) -> tuple[dict[int, Any], str]:
     """Check explicit on-disk fields without inventing absent provenance."""
     _require(not ("J" in checkpoint and "parameters" in checkpoint), "ambiguous_checkpoint_format", "both J and parameters")
@@ -210,8 +224,10 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
         _require("relative_end_transport_layer" in config, "missing_checkpoint_target", "relative_end_transport_layer")
         target = config["relative_end_transport_layer"]
         _require(type(target) is int and model["num_layers"] + target == manifest["target_layer"], "checkpoint_target_mismatch", "relative target")
-        if config.get("source_layers") is not None:
-            _require(config["source_layers"] == layers, "checkpoint_layer_mismatch", "config.source_layers")
+        if "source_layers" in config:
+            resolved = _configured_source_layers(config["source_layers"], model["num_layers"],
+                                                 manifest["target_layer"], "config.source_layers")
+            _require(resolved == layers, "checkpoint_layer_mismatch", "config.source_layers")
         if "parameters" in checkpoint:
             parameters = checkpoint["parameters"]
             _require(isinstance(parameters, Mapping) and set(parameters) == {"jacobians"}, "unsupported_parameters", "one linear map family required")
@@ -262,13 +278,16 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
             _require(isinstance(source, Mapping), "invalid_checkpoint_provenance", "source_config")
             for key, expected in (
                 ("hf_model_name", model["id"]), ("d_model", model["width"]),
-                ("source_layers", layers),
                 ("relative_end_transport_layer", manifest["target_layer"] - model["num_layers"]),
                 ("model_revision", model["revision"]), ("tokenizer_id", model["tokenizer_id"]),
                 ("tokenizer_revision", model["tokenizer_revision"]),
             ):
                 if key in source:
                     _require(source[key] == expected, "checkpoint_provenance_mismatch", f"source_config.{key}")
+            if "source_layers" in source:
+                resolved = _configured_source_layers(source["source_layers"], model["num_layers"],
+                                                     manifest["target_layer"], "source_config.source_layers")
+                _require(resolved == layers, "checkpoint_provenance_mismatch", "source_config.source_layers")
         for key, model_key in (("model_revision", "revision"), ("tokenizer_id", "tokenizer_id"),
                                ("tokenizer_revision", "tokenizer_revision")):
             if key in provenance:
@@ -277,7 +296,7 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
 
 
 def _load_verified_checkpoint(path: str | Path, expected_sha256: str) -> Mapping[str, Any]:
-    """Hash and safely load the same open file for inspection or transport."""
+    """Hash an immutable byte snapshot, then safely load only those bytes."""
     _require(_digest(expected_sha256, 64), "invalid_artifact_hash", "lowercase SHA256 required")
     path = Path(path)
     try:
@@ -285,19 +304,18 @@ def _load_verified_checkpoint(path: str | Path, expected_sha256: str) -> Mapping
     except ImportError as error:
         raise LensInteropError("dependency_unavailable", "torch is required for tensor loading") from error
     try:
-        handle = path.open("rb")
+        snapshot = path.read_bytes()
     except OSError as error:
         raise LensInteropError("artifact_unavailable", str(error)) from error
-    with handle:
-        digest = hashlib.file_digest(handle, "sha256").hexdigest()
-        _require(digest == expected_sha256, "artifact_hash_mismatch", str(path))
-        handle.seek(0)
-        try:
-            # Load the same open file that was hashed, not a pathname that
-            # could have been replaced after the identity check.
-            checkpoint = torch.load(handle, map_location="cpu", weights_only=True)
-        except Exception as error:
-            raise LensInteropError("safe_checkpoint_load_failed", str(error)) from error
+    digest = hashlib.sha256(snapshot).hexdigest()
+    _require(digest == expected_sha256, "artifact_hash_mismatch", str(path))
+    try:
+        # An open source descriptor can still be modified in place. Only the
+        # immutable bytes whose digest was checked reach deserialization.
+        with io.BytesIO(snapshot) as stream:
+            checkpoint = torch.load(stream, map_location="cpu", weights_only=True)
+    except Exception as error:
+        raise LensInteropError("safe_checkpoint_load_failed", str(error)) from error
     _require(isinstance(checkpoint, Mapping), "unsupported_checkpoint_format", "object required")
     return checkpoint
 

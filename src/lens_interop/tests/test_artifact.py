@@ -306,3 +306,70 @@ def test_checkpoint_tokenizer_identity_must_match_manifest(tmp_path: Path, scope
     with pytest.raises(LensInteropError) as caught:
         load_verified_lens(path, manifest, manifest["model"])
     assert caught.value.code in {"model_mismatch", "checkpoint_provenance_mismatch"}
+
+
+@pytest.mark.parametrize("scope", ["config", "source_config"])
+@pytest.mark.parametrize("notation", [[-3, -2], [1, 0], [1, -3, 1, -2], None])
+def test_configured_layer_notation_matches_trainer_without_rewriting_metadata(
+    tmp_path: Path, scope: str, notation: list[int] | None,
+) -> None:
+    checkpoint = _checkpoint("base_lens_parameters" if scope == "config" else "released_J")
+    if scope == "config":
+        checkpoint["config"]["source_layers"] = notation
+    else:
+        checkpoint["provenance"]["source_config"] = {"source_layers": notation}
+    path, manifest = _save(tmp_path, checkpoint)
+    loaded = load_verified_lens(path, manifest, manifest["model"])
+    assert sorted(loaded.matrices) == [0, 1]
+    assert loaded.raw_metadata == {key: value for key, value in checkpoint.items() if key not in {"J", "parameters"}}
+
+
+@pytest.mark.parametrize("notation", [[-4, -2], [0, -1], [True, 1], [], [0], "all"])
+def test_configured_layers_still_refuse_invalid_or_different_resolved_sets(
+    tmp_path: Path, notation: object,
+) -> None:
+    checkpoint = _checkpoint("base_lens_parameters")
+    checkpoint["config"]["source_layers"] = notation
+    path, manifest = _save(tmp_path, checkpoint)
+    with pytest.raises(LensInteropError, match="checkpoint_layer_mismatch"):
+        load_verified_lens(path, manifest, manifest["model"])
+
+
+def test_default_config_layers_must_match_complete_pre_target_set(tmp_path: Path) -> None:
+    checkpoint = _checkpoint("base_lens_parameters")
+    checkpoint["config"]["source_layers"] = None
+    checkpoint["parameters"]["jacobians"].pop(0)
+    checkpoint["source_layers"] = [1]
+    path, manifest = _save(tmp_path, checkpoint)
+    manifest["source_layers"] = [1]
+    with pytest.raises(LensInteropError, match="checkpoint_layer_mismatch"):
+        load_verified_lens(path, manifest, manifest["model"])
+
+
+@pytest.mark.parametrize("operation", ["transport", "inspection"])
+def test_source_mutation_after_hash_does_not_change_deserialized_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
+) -> None:
+    original = _checkpoint("released_J")
+    original["provenance"]["marker"] = "verified_original"
+    path, manifest = _save(tmp_path, original)
+    replacement = copy.deepcopy(original)
+    replacement["provenance"]["marker"] = "unverified_replacement"
+    replacement["J"][0] = 3 * torch.eye(2)
+    actual_load = torch.load
+
+    def mutate_then_load(stream: object, **kwargs: object) -> object:
+        # Rewrites the same inode between the digest check and safe loading.
+        torch.save(replacement, path)
+        return actual_load(stream, **kwargs)
+
+    monkeypatch.setattr(torch, "load", mutate_then_load)
+    if operation == "transport":
+        loaded = load_verified_lens(path, manifest, manifest["model"])
+        assert loaded.raw_metadata["provenance"]["marker"] == "verified_original"
+        torch.testing.assert_close(loaded.matrices[0], torch.eye(2))
+    else:
+        inspected = inspect_verified_artifact(path, manifest["artifact"]["sha256"])
+        assert inspected["raw_metadata"]["provenance"]["marker"] == "verified_original"
+        assert inspected["artifact_sha256"] == manifest["artifact"]["sha256"]
+    assert hashlib.sha256(path.read_bytes()).hexdigest() != manifest["artifact"]["sha256"]

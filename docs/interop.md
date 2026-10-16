@@ -43,7 +43,14 @@ The loader accepts released `J` files and configured `parameters.jacobians`
 files, plus the configured top-level `J` variation. All must carry explicit
 `source_layers`; every matrix must match the declared width, layer set, and
 finite floating dtype. Every fitted source must strictly precede its transport
-target, matching the upstream trainer. Files containing both top-level `J` and
+target, matching the upstream trainer. A configured checkpoint can preserve
+negative indices, unsorted/duplicate entries, or `None` in its original
+`config.source_layers` (also `provenance.source_config.source_layers`). For
+comparison only, resolve negative indices against the model layer count, sort
+and deduplicate; `None` means all layers strictly before the target. The resolved
+set must match the explicit top-level layer list and matrix keys. The original
+configuration is retained verbatim, and out-of-range or target-equal sources
+still refuse. Files containing both top-level `J` and
 `parameters` refuse as ambiguous in inspection and transport, rather than
 choosing one of two potentially different maps. The configured format must identify its algebra and
 relative target. On-disk provenance, including converted J++ `source_config`,
@@ -99,11 +106,15 @@ research measurements.
 
 `inspect_verified_artifact(path, expected_sha256)` is a separate, inspection-only
 entry point. It shares the same SHA256 check and `torch.load` call as the transport
-loader: the same open file is hashed and loaded with `weights_only=True` and
-`map_location="cpu"`, with no unrestricted fallback. It does not construct a
-`LoadedLens`, accept a guessed fit revision, or weaken `load_verified_lens`'s
-unknown-identity refusal. Inspection needs enough RAM for the artifact itself;
-it does not load a model or download anything.
+loader: an immutable byte snapshot is hashed, then only those verified bytes
+are loaded with `weights_only=True` and `map_location="cpu"`, with no unrestricted
+fallback. Replacing or modifying the source file after hashing cannot substitute
+different bytes during loading. It does not construct a `LoadedLens`, accept a
+guessed fit revision, or weaken `load_verified_lens`'s unknown-identity refusal.
+The memory preflight must allow the serialized snapshot in addition to loaded
+tensors and loader overhead; this is not a resource-size gate. Inspection does
+not load a model or download anything. Earlier inspection timings/memory records
+predate this snapshot change and are not fresh benchmarks of it.
 
 ```bash
 PYTHONPATH=src python -m lens_interop \
