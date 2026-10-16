@@ -119,3 +119,42 @@ def test_sources_must_strictly_precede_transport_target(layers: list[int]) -> No
     manifest["source_layers"] = layers
     with pytest.raises(LensInteropError, match="invalid_source_layers"):
         validate_manifest(manifest)
+
+
+@pytest.mark.parametrize("key,value", [
+    ("id", "synthetic/other"), ("revision", "3" * 40),
+    ("width", 4), ("num_layers", 4),
+])
+def test_topology_requires_audited_exact_identity(key: str, value: object) -> None:
+    manifest = synthetic_manifest()
+    manifest["model"][key] = value
+    with pytest.raises(LensInteropError, match="unsupported_residual_topology"):
+        validate_manifest(manifest, manifest["model"])
+
+
+def test_reviewed_qwen_topology_is_not_a_fit_identity_substitute() -> None:
+    manifest = synthetic_manifest()
+    manifest["model"] = {
+        "id": "Qwen/Qwen3-4B", "revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+        "tokenizer_id": "Qwen/Qwen3-4B", "tokenizer_revision": "1cfa9a7208912126459214e8b04321603b3df60c",
+        "width": 2560, "num_layers": 36,
+    }
+    manifest["fit_identity_evidence"] = "Synthetic metadata assertion only; no released fit claim"
+    assert validate_manifest(manifest)["status"] == "validated"
+    manifest["model"]["revision"] = None
+    report = validate_manifest(manifest)
+    assert report["status"] == "unsupported"
+    assert report["reasons"] == [{"code": "unknown_fit_identity", "fields": ["revision"]}]
+
+
+def test_recipe_presets_match_the_audited_upstream_literal() -> None:
+    import ast
+
+    from lens_interop.artifact import _LRP_MODES
+
+    source = Path(__file__).resolve().parents[2] / "workspace_lens/lrp/types.py"
+    tree = ast.parse(source.read_text())
+    assignment = next(node for node in tree.body if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == "LrpMode" for target in node.targets))
+    assert isinstance(assignment.value, ast.Subscript)
+    assert set(ast.literal_eval(assignment.value.slice)) == _LRP_MODES

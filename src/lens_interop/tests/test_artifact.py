@@ -373,3 +373,146 @@ def test_source_mutation_after_hash_does_not_change_deserialized_snapshot(
         assert inspected["raw_metadata"]["provenance"]["marker"] == "verified_original"
         assert inspected["artifact_sha256"] == manifest["artifact"]["sha256"]
     assert hashlib.sha256(path.read_bytes()).hexdigest() != manifest["artifact"]["sha256"]
+
+
+@pytest.mark.parametrize("provenance_kind", ["absent", "without_target"])
+@pytest.mark.parametrize("target", [1, 2])
+def test_legacy_missing_target_uses_upstream_final_block_convention(
+    tmp_path: Path, provenance_kind: str, target: int,
+) -> None:
+    checkpoint = _checkpoint("released_J")
+    checkpoint["J"].pop(1)
+    checkpoint["source_layers"] = [0]
+    if provenance_kind == "absent":
+        checkpoint.pop("provenance")
+    else:
+        checkpoint["provenance"].pop("target_layer")
+    path, manifest = _save(tmp_path, checkpoint)
+    manifest["source_layers"] = [0]
+    manifest["target_layer"] = target
+    if target == 2:
+        loaded = load_verified_lens(path, manifest, manifest["model"])
+        assert loaded.manifest["target_layer"] == 2
+        assert loaded.raw_metadata == {key: value for key, value in checkpoint.items() if key != "J"}
+    else:
+        with pytest.raises(LensInteropError, match="checkpoint_target_mismatch"):
+            load_verified_lens(path, manifest, manifest["model"])
+
+
+def test_explicit_legacy_target_may_precede_final_block(tmp_path: Path) -> None:
+    checkpoint = _checkpoint("released_J")
+    checkpoint["J"].pop(1)
+    checkpoint["source_layers"] = [0]
+    checkpoint["provenance"]["target_layer"] = 1
+    path, manifest = _save(tmp_path, checkpoint)
+    manifest["source_layers"] = [0]
+    manifest["target_layer"] = 1
+    loaded = load_verified_lens(path, manifest, manifest["model"])
+    assert loaded.manifest["target_layer"] == 1
+
+
+@pytest.mark.parametrize("mode", ["none", "rlens", "r+mhc", "all-c4+mhc", "r+moe"])
+@pytest.mark.parametrize("method", ["j_lens", "r_lens", "jpp"])
+def test_configured_recipe_cannot_contradict_scientific_method(
+    tmp_path: Path, mode: str, method: str,
+) -> None:
+    checkpoint = _checkpoint("base_lens_parameters")
+    checkpoint["config"]["lrp_mode"] = mode
+    path, manifest = _save(tmp_path, checkpoint)
+    manifest["method"] = method
+    allowed = method == "jpp" or (method == "j_lens" and mode == "none") or (method == "r_lens" and mode != "none")
+    if allowed:
+        loaded = load_verified_lens(path, manifest, manifest["model"])
+        assert loaded.manifest["method"] == method
+        assert loaded.raw_metadata["config"]["lrp_mode"] == mode
+    else:
+        with pytest.raises(LensInteropError, match="checkpoint_method_mismatch"):
+            load_verified_lens(path, manifest, manifest["model"])
+
+
+@pytest.mark.parametrize("scope", ["provenance", "source_config"])
+@pytest.mark.parametrize("method,mode", [("j_lens", "rlens"), ("r_lens", "none")])
+def test_released_recipe_conflicts_also_refuse(
+    tmp_path: Path, scope: str, method: str, mode: str,
+) -> None:
+    checkpoint = _checkpoint("released_J")
+    checkpoint["provenance"]["method"] = method
+    if scope == "source_config":
+        checkpoint["provenance"]["source_config"] = {"lrp_mode": mode}
+    else:
+        checkpoint["provenance"]["lrp_mode"] = mode
+    path, manifest = _save(tmp_path, checkpoint)
+    manifest["method"] = method
+    with pytest.raises(LensInteropError, match="checkpoint_method_mismatch"):
+        load_verified_lens(path, manifest, manifest["model"])
+
+
+@pytest.mark.parametrize("mode", [None, "unrecognized", ["none"]])
+def test_unknown_recipe_is_not_assumed_standard(tmp_path: Path, mode: object) -> None:
+    checkpoint = _checkpoint("configured_J")
+    checkpoint["config"]["lrp_mode"] = mode
+    path, manifest = _save(tmp_path, checkpoint)
+    with pytest.raises(LensInteropError, match="unsupported_checkpoint_recipe"):
+        load_verified_lens(path, manifest, manifest["model"])
+
+
+def test_configured_recipe_must_be_explicit(tmp_path: Path) -> None:
+    checkpoint = _checkpoint("configured_J")
+    checkpoint["config"].pop("lrp_mode")
+    path, manifest = _save(tmp_path, checkpoint)
+    with pytest.raises(LensInteropError, match="missing_checkpoint_recipe"):
+        load_verified_lens(path, manifest, manifest["model"])
+
+
+@pytest.mark.parametrize("metadata", [
+    {"lrp_mode": "none"},
+    {"source_config": {"lrp_mode": "none"}},
+    {"config_json": '{"estimator": "standard"}'},
+])
+def test_explicit_jpp_still_refuses_conflicting_embedded_recipes(tmp_path: Path, metadata: dict) -> None:
+    checkpoint = _checkpoint("configured_J")
+    checkpoint["provenance"] = {"method": "jpp", **metadata}
+    path, manifest = _save(tmp_path, checkpoint)
+    with pytest.raises(LensInteropError, match="checkpoint_recipe_mismatch"):
+        load_verified_lens(path, manifest, manifest["model"])
+
+
+def test_explicit_jpp_and_consistent_relp_metadata_keep_jpp_identity(tmp_path: Path) -> None:
+    checkpoint = _checkpoint("configured_J")
+    checkpoint["provenance"] = {"method": "jpp", "config_json": '{"estimator": "relp"}'}
+    path, manifest = _save(tmp_path, checkpoint)
+    loaded = load_verified_lens(path, manifest, manifest["model"])
+    assert loaded.manifest["method"] == "jpp"
+    assert loaded.raw_metadata["provenance"] == checkpoint["provenance"]
+
+
+def test_explicit_method_does_not_override_contradictory_legacy_estimator(tmp_path: Path) -> None:
+    checkpoint = _checkpoint("released_J")
+    checkpoint["provenance"].update(method="r_lens", config_json='{"estimator": "standard"}')
+    path, manifest = _save(tmp_path, checkpoint)
+    manifest["method"] = "r_lens"
+    with pytest.raises(LensInteropError, match="checkpoint_method_mismatch"):
+        load_verified_lens(path, manifest, manifest["model"])
+
+
+def test_saved_multi_stream_model_refuses_before_deserialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = _checkpoint("base_lens_parameters")
+    # Square maps alone hide the upstream stream-mean fitting convention.
+    checkpoint["config"]["hf_model_name"] = "deepseek-ai/DeepSeek-V4-Flash"
+    path, manifest = _save(tmp_path, checkpoint)
+    manifest["model"]["id"] = checkpoint["config"]["hf_model_name"]
+    manifest["model"]["tokenizer_id"] = manifest["model"]["id"]
+
+    def forbidden_load(*args: object, **kwargs: object) -> None:
+        pytest.fail("an unaudited topology must refuse before tensor loading")
+
+    monkeypatch.setattr(torch, "load", forbidden_load)
+    with pytest.raises(LensInteropError, match="unsupported_residual_topology"):
+        load_verified_lens(path, manifest, manifest["model"])
+    # Inspection still describes the file without authorizing a stream meaning.
+    monkeypatch.undo()
+    inspected = inspect_verified_artifact(path, manifest["artifact"]["sha256"])
+    assert inspected["transport_authorized"] is False
+    assert inspected["raw_metadata"]["config"] == checkpoint["config"]

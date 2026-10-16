@@ -38,5 +38,5 @@
     "target_layer": {"type": "integer", "minimum": 0}
   },
   "$defs": {"revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"}},
-  "$comment": "validate_manifest additionally checks ordering, layer bounds, exact-model equality and required evidence for known fit identities. Unknown identity is inspectable but cannot authorize tensor transport."
+  "$comment": "validate_manifest additionally checks ordering, layer bounds, exact-model equality, required evidence for known fit identities, and a bounded independently audited single-stream model identity set. Unknown identity is inspectable but cannot authorize tensor transport."
 }

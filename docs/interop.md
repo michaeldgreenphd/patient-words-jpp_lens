@@ -52,18 +52,36 @@ set must match the explicit top-level layer list and matrix keys. The original
 configuration is retained verbatim, and out-of-range or target-equal sources
 still refuse. Files containing both top-level `J` and
 `parameters` refuse as ambiguous in inspection and transport, rather than
-choosing one of two potentially different maps. The configured format must identify its algebra and
-relative target. On-disk provenance, including converted J++ `source_config`,
+choosing one of two potentially different maps. The configured format must identify its algebra,
+relative target, and `lrp_mode`. For a released file without
+`provenance.target_layer`, the manifest must name the final block
+(`num_layers - 1`), matching `workspace_lens.utils.load_legacy_format_lens`.
+An explicit provenance target may precede that block. Neither missing target
+metadata nor matrix keys authorize an arbitrary transport target. The raw file
+is not rewritten to insert this convention.
+On-disk provenance, including converted J++ `source_config`,
 is cross-checked where present. Missing fields are not filled into the raw
 provenance: `LoadedLens.raw_metadata` preserves it unchanged.
 
-When a legacy release has no explicit `provenance.method`, its
-`provenance.config_json.estimator` is cross-checked: `relp` is consistent with
-R-Lens, and `standard` with J-Lens, following the upstream legacy loader's
-estimator distinction. Malformed or unknown estimator metadata refuses instead
-of becoming a default method. This check does not turn the converted J++
-`source_config.lrp_mode=rlens` fitting recipe into an R-Lens scientific label;
-its explicit `provenance.method=jpp` stays J++. Embedded tokenizer IDs in direct
+Every present `lrp_mode` in `config`, direct provenance, or `source_config`
+is checked against the upstream `LensConfig` presets. `none` denotes the
+standard-gradient recipe and contradicts an R-Lens label; the RelP presets
+contradict a J-Lens label. A recipe alone cannot distinguish J++'s learned
+expert mixture from its pooled R-Lens reference, so J++ still requires separate
+method evidence and is never relabeled from `lrp_mode`. This check covers both
+standard and RelP expert-fit recipes. Unknown modes refuse, and multiple
+embedded recipe fields must agree. The configured layout requires the field;
+missing legacy fields are not invented.
+
+A legacy `provenance.config_json.estimator` is also cross-checked: `relp` is
+consistent with R-Lens and `standard` with J-Lens, following the upstream legacy
+loader's estimator distinction. An explicit `provenance.method=jpp` retains
+that distinct method, while any present `lrp_mode` must still agree with the
+estimator. Other explicit method labels cannot override a contradictory
+estimator. Malformed or unknown estimator metadata refuses instead of becoming
+a default method. This check does not turn the converted J++
+`source_config.lrp_mode=rlens` fitting recipe into an R-Lens scientific label.
+Embedded tokenizer IDs in direct
 provenance and `source_config` must agree with the independently supplied manifest,
 just as embedded fit revisions must. Raw metadata remains unchanged.
 
@@ -78,6 +96,44 @@ layer may precede both the transport target and the model's final block.
 forward's `.logits`, selects the same explicit positions, and returns both
 without substituting lens readouts for output. The caller proves that cached
 activations and output came from identical prompt bytes and token IDs.
+
+## Bounded single-stream topology support
+
+A square matrix and `stream_reduction="none"` in a caller's manifest are not
+independent evidence of residual topology. The upstream multi-stream fitter
+(`workspace_lens/residual_streams.py` and `fitting/jacobian_fitting.py`) averages
+target streams and sums source-stream gradients under a uniform-perturbation
+convention. A saved `BaseLens` file need not record that reduction. This adapter
+therefore refuses `unsupported_residual_topology` before deserialization for
+known fit identities outside its deliberately narrow audit:
+
+- `Qwen/Qwen3-4B@1cfa9a7208912126459214e8b04321603b3df60c`, width 2560,
+  36 blocks. Its previously retrieved pinned `config.json` has SHA256
+  `8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a`,
+  `model_type=qwen3`, `architectures=["Qwen3ForCausalLM"]`, and no custom
+  `auto_map`. An independent local source inspection of Transformers 5.16.1
+  `models/qwen3/modeling_qwen3.py` (SHA256
+  `cbb7f2dc274c2f5592746c0dc6985ca50353efa07376f92cc922b77680a74f69`)
+  confirmed that `Qwen3DecoderLayer.forward` preserves the single
+  `[batch, sequence, hidden]` residual through both additions; it does not add
+  or collapse a stream axis. This is an architecture audit, not a completed
+  J++ locked-environment installation or real-model parity run.
+- The exact `synthetic/toy` fixture identity at forty `1` characters, width 2,
+  three blocks. This is a test identity only; it must never label real
+  activations or a released artifact. Its tensors are constructed locally by
+  tests and provide no evidence about any released model.
+
+The tuple includes the exact model revision, width and block count: neither a
+matching spelling nor dimensions authorize a different revision or family.
+Adding a model requires a new independent architecture audit. In particular,
+DeepSeek's saved stream-mean maps are unsupported even if a caller labels them
+`none`; there is no silent averaging path. Unknown fit identity still returns
+`unknown_fit_identity` before transport, with topology unevaluated. The released
+Qwen J++ checkpoint's historical fit revisions remain unknown: this capability
+list does not establish them. Inspection remains available for unsupported
+models and reports no transport authorization. Schema shape stays unchanged;
+previously accepted unaudited model identities or contradictory metadata now
+fail closed, intentionally.
 
 ## Offline use
 

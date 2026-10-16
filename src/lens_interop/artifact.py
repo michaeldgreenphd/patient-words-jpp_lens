@@ -20,6 +20,14 @@ from typing import Any
 
 SCHEMA_VERSION = "lens-interop/1"
 METHODS = frozenset({"j_lens", "jpp", "r_lens"})
+# Deliberately bounded topology audit, not a model-name heuristic. Evidence and
+# scope are recorded in docs/interop.md. The toy entry is test-only metadata.
+_SINGLE_STREAM_IDENTITIES = frozenset({
+    ("Qwen/Qwen3-4B", "1cfa9a7208912126459214e8b04321603b3df60c", 2560, 36),
+    ("synthetic/toy", "1" * 40, 2, 3),
+})
+# The upstream LensConfig presets; keep the dependency-free boundary explicit.
+_LRP_MODES = frozenset({"none", "rlens", "r+mhc", "all-c4+mhc", "r+moe"})
 
 
 class LensInteropError(ValueError):
@@ -115,6 +123,9 @@ def validate_manifest(
             isinstance(manifest.get("fit_identity_evidence"), str) and bool(manifest["fit_identity_evidence"].strip()),
             "missing_fit_identity_evidence", "exact fit revisions require a source",
         )
+        identity = (model["id"], model["revision"], model["width"], model["num_layers"])
+        _require(identity in _SINGLE_STREAM_IDENTITIES, "unsupported_residual_topology",
+                 "no independent single-stream topology audit for this exact model identity")
     return {
         "schema_version": SCHEMA_VERSION,
         "status": "unsupported" if unknown else "validated",
@@ -208,17 +219,35 @@ def _configured_source_layers(value: Any, num_layers: int, target: int, location
     return resolved
 
 
+def _check_lrp_recipe(metadata: Mapping[str, Any], method: str, location: str, *, required: bool = False) -> str | None:
+    """Check estimator contradictions without identifying J++ from its recipe."""
+    if "lrp_mode" not in metadata:
+        _require(not required, "missing_checkpoint_recipe", f"{location}.lrp_mode")
+        return None
+    mode = metadata["lrp_mode"]
+    _require(isinstance(mode, str) and mode in _LRP_MODES,
+             "unsupported_checkpoint_recipe", f"{location}.lrp_mode")
+    _require(method != "r_lens" or mode != "none", "checkpoint_method_mismatch", f"{location}.lrp_mode")
+    _require(method != "j_lens" or mode == "none", "checkpoint_method_mismatch", f"{location}.lrp_mode")
+    return mode
+
+
 def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) -> tuple[dict[int, Any], str]:
     """Check explicit on-disk fields without inventing absent provenance."""
     _require(not ("J" in checkpoint and "parameters" in checkpoint), "ambiguous_checkpoint_format", "both J and parameters")
     model = manifest["model"]
     layers = manifest["source_layers"]
+    recipes = []
+    provenance = checkpoint.get("provenance")
+    if provenance is not None:
+        _require(isinstance(provenance, Mapping), "invalid_checkpoint_provenance", "object required")
     on_disk_layers = checkpoint.get("source_layers")
     _require(isinstance(on_disk_layers, list) and all(type(layer) is int for layer in on_disk_layers) and on_disk_layers == layers, "checkpoint_layer_mismatch", "source_layers")
     if "config" in checkpoint:
         config = checkpoint["config"]
         _require(isinstance(config, Mapping), "invalid_checkpoint_config", "object required")
         _require(config.get("lens_type") == "jacobian", "missing_or_unsupported_checkpoint_method", "linear Jacobian family required")
+        recipes.append(_check_lrp_recipe(config, manifest["method"], "config", required=True))
         _require(config.get("hf_model_name") == model["id"], "model_mismatch", "checkpoint hf_model_name")
         _require(config.get("d_model") == model["width"], "checkpoint_width_mismatch", "config.d_model")
         _require("relative_end_transport_layer" in config, "missing_checkpoint_target", "relative_end_transport_layer")
@@ -242,11 +271,15 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
         _require(checkpoint.get("d_model") == model["width"], "checkpoint_width_mismatch", "d_model")
         matrices = checkpoint["J"]
         file_format = "released_J"
+        # The upstream legacy loader uses the final block unless the absolute
+        # target is explicitly embedded. Matrix keys cannot identify a target.
+        if provenance is None or "target_layer" not in provenance:
+            _require(manifest["target_layer"] == model["num_layers"] - 1,
+                     "checkpoint_target_mismatch", "legacy target without provenance is the final block")
     _require(isinstance(matrices, dict) and all(type(key) is int for key in matrices), "invalid_matrices", "integer layer keys required")
     _require(sorted(matrices) == layers, "checkpoint_layer_mismatch", "matrix keys")
-    provenance = checkpoint.get("provenance")
     if provenance is not None:
-        _require(isinstance(provenance, Mapping), "invalid_checkpoint_provenance", "object required")
+        recipes.append(_check_lrp_recipe(provenance, manifest["method"], "provenance"))
         for key, expected in (
             ("hf_model_name", model["id"]),
             ("target_layer", manifest["target_layer"]),
@@ -258,7 +291,7 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
         if "method" in provenance:
             external_names = {"jpp": "jpp", "jlens": "j_lens", "j_lens": "j_lens", "rlens": "r_lens", "r_lens": "r_lens"}
             _require(isinstance(provenance["method"], str) and external_names.get(provenance["method"]) == manifest["method"], "checkpoint_method_mismatch", "method")
-        elif "config_json" in provenance:
+        if "config_json" in provenance:
             # This legacy release field has estimator semantics; the converted
             # J++ source_config.lrp_mode field is a recipe, not a method label.
             try:
@@ -270,12 +303,14 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
             _require(isinstance(estimator, str) and estimator in {"relp", "standard"},
                      "unsupported_legacy_estimator", "explicit standard or relp estimator required")
             legacy_method = "r_lens" if estimator == "relp" else "j_lens"
-            _require(manifest["method"] == legacy_method, "checkpoint_method_mismatch", "provenance.config_json.estimator")
+            if provenance.get("method") != "jpp":
+                _require(manifest["method"] == legacy_method, "checkpoint_method_mismatch", "provenance.config_json.estimator")
         # The converted J++ release puts its original BaseLens config here.
         # Check it when present; keep it verbatim in raw_metadata below.
         if "source_config" in provenance:
             source = provenance["source_config"]
             _require(isinstance(source, Mapping), "invalid_checkpoint_provenance", "source_config")
+            recipes.append(_check_lrp_recipe(source, manifest["method"], "provenance.source_config"))
             for key, expected in (
                 ("hf_model_name", model["id"]), ("d_model", model["width"]),
                 ("relative_end_transport_layer", manifest["target_layer"] - model["num_layers"]),
@@ -292,6 +327,11 @@ def _check_metadata(checkpoint: Mapping[str, Any], manifest: Mapping[str, Any]) 
                                ("tokenizer_revision", "tokenizer_revision")):
             if key in provenance:
                 _require(provenance[key] == model[model_key], "model_mismatch", key)
+    present_recipes = {recipe for recipe in recipes if recipe is not None}
+    _require(len(present_recipes) <= 1, "checkpoint_recipe_mismatch", "embedded lrp_mode fields disagree")
+    if provenance is not None and "config_json" in provenance and present_recipes:
+        expected_estimator = "standard" if "none" in present_recipes else "relp"
+        _require(estimator == expected_estimator, "checkpoint_recipe_mismatch", "config_json.estimator and lrp_mode disagree")
     return matrices, file_format
 
 
