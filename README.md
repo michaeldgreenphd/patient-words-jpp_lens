@@ -174,6 +174,20 @@ The code is released under the Apache License 2.0 ([LICENSE](LICENSE)). `src/jle
 `src/workspace_lens/` derive from anthropics/jacobian-lens, and the LRP rules derive from the R-Lens
 implementation of Camila Blank and Agam Bhatia; see [NOTICE](NOTICE).
 
-## Citation
+## Citation Information
 
-Citation information coming soon.
+For attribution in academic contexts, please cite this work as:
+
+> Ayonrinde and Lindsey, "J++ Lens: Jacobian Filtering Enables More Faithful Workspace Lenses", LessWrong, 2026.
+
+**BibTeX citation**
+
+```bibtex
+@article{ayonrinde2026jpplens,
+  author={Ayonrinde, Kola and Lindsey, Jack},
+  title={{J++} Lens: Jacobian Filtering Enables More Faithful Workspace Lenses},
+  journal={LessWrong},
+  year={2026},
+  url={https://www.lesswrong.com/posts/nc9dHfcB22JdMzGbr/j-lens-jacobian-filtering-enables-more-faithful-workspace}
+}
+```
