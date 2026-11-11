@@ -1,5 +1,35 @@
 # J++ Lens
 
+> **PatientWords fork of `safety-research/jpp_lens`.** This fork adds `src/lens_interop/`, a lens interchange
+> contract that verifies an artifact by hash and refuses transport when the fit identity is unknown. Its guide is
+> [docs/interop.md](docs/interop.md). On 2026-11-10 no PatientWords measurement had executed this repository's
+> code. Its role is recorded in the PatientWords engine's
+> [ecosystem map](https://github.com/michaeldgreenphd/patientwords-engine/blob/main/docs/ecosystem.md#patient-words-jpp_lens)
+> and [repository registry](https://github.com/michaeldgreenphd/patientwords-engine/blob/main/data/ecosystem/repositories.v1.json).
+> To start on the project offline, follow the engine's
+> [offline quickstart](https://github.com/michaeldgreenphd/patientwords-engine/blob/main/docs/start_here.md#procedure-a-offline-quickstart),
+> which needs no method fork.
+>
+> Offline validation and inspection of a lens artifact, from the repository root (the guide's commands):
+>
+> ```bash
+> PYTHONPATH=src python -m lens_interop --manifest manifest.json
+> PYTHONPATH=src python -m lens_interop --manifest manifest.json --expected-model model.json --artifact /path/to/local/lens.pt
+> PYTHONPATH=src python -m pytest -q src/lens_interop/tests
+> PYTHONPATH=src python -m lens_interop \
+>   --inspect /path/to/Qwen3-4B_jpp_lens.pt \
+>   --sha256 893f7da243ab60d0628548a8c2b3afebaa45afdb1877d1c11521fde53209722d
+> ```
+>
+> `manifest.json` stands for a manifest path; [`examples/interop/`](examples/interop) holds two. The first
+> command imports no Torch, and the tests that load tensors skip without it. The `--artifact` and `--inspect`
+> forms need Torch and a local lens file; they download nothing and load no model. A manifest that gives the
+> model and tokenizer revisions the lens was fitted on can return `validated` (exit 0) and load for transport.
+> With those revisions unknown (JSON null) it returns `unsupported / unknown_fit_identity` (exit 2) and tensor
+> loading refuses; `--inspect` still describes the hash-verified file and reports `transport_authorized=false`.
+> The released Qwen3-4B J++ lens is the unknown-fit case: `examples/interop/qwen3-4b-jpp-unknown-fit.json`.
+> The rest of this README is the upstream project's.
+
 Code and evaluations for the project *J++ Lens: Jacobian Filtering Enables More
 Faithful Workspace Lenses* (Ayonrinde & Lindsey, 2026).
 
